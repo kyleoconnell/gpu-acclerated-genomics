@@ -1,0 +1,401 @@
+configfile: "config.yaml"
+SAMPLES=config["samples"]
+REF=config["ref"]
+VC = config["variant_caller"]
+print('samples=', SAMPLES)
+print('reference=', REF)
+print('Variant Caller=', VC)
+
+if config["variant_caller"] == 'haplotypecaller':
+	rule all:
+		input:
+			#bwa
+			expand(["data/aligned/{sample}.bam"],sample=SAMPLES), 
+			# Samtools flagstat
+			expand(["data/stats/{sample}_stats.txt"],sample=SAMPLES), 
+			# Samtools depth + find_depth.py
+			#expand(["data/stats/{sample}.depth_all.out"],sample=SAMPLES), 
+			# Haplotypecaller
+			expand(["data/calls/{sample}.hc.vcf.gz"],sample=SAMPLES),
+			# Vcftools
+			#expand(["data/stats/{sample}.hc.log.out"],sample=SAMPLES,vc=VC), 
+			# Hap.py
+			#expand(["data/calls/{sample}.haplotypecaller.results.runinfo.json"],sample=SAMPLES), 
+			# Benchmark time
+			expand(["benchmarks/{sample}_hc_total_time.txt"],sample=SAMPLES)
+			
+elif config["variant_caller"] == 'deepvariant':
+	rule all:
+		input:
+			#bwa
+			expand(["data/aligned/{sample}.bam"],sample=SAMPLES), 
+			# Samtools flagstat
+			expand(["data/stats/{sample}_stats.txt"],sample=SAMPLES), 
+			# Samtools depth + find_depth.py
+			#expand(["data/stats/{sample}.depth_all.out"],sample=SAMPLES), 
+			# Markdups
+			expand(["data/dedup/{sample}.dedup.metrics.txt"],sample=SAMPLES),
+			# Index bam
+			expand(["data/dedup/{sample}_dedup.bam.bai"],sample=SAMPLES),
+			# Run DeepVariant
+			expand(["data/calls/{sample}.dv.vcf"],sample=SAMPLES),
+			# Vcftools
+			expand(["data/stats/{sample}.dv.log"],sample=SAMPLES), 
+			# Hap.py
+			expand(["data/calls/{sample}.deepvariant.results.runinfo.json"],sample=SAMPLES), 
+			# Benchmark time
+			expand(["benchmarks/{sample}_dv_total_time.txt"],sample=SAMPLES)
+			
+rule sum_times_hc:
+	input:
+		expand(["benchmarks/{sample}.hc.benchmark.txt"],sample=SAMPLES),
+	output:
+		expand(["benchmarks/{sample}_hc_total_time.txt"],sample=SAMPLES,vc=VC), 
+	params: var_cal={VC}
+	script:
+		"scripts/summarize_benchmarking.py"
+
+rule sum_times_dv:
+	input:
+		expand(["benchmarks/{sample}.dv.benchmark.txt"],sample=SAMPLES),
+	output:
+		expand(["benchmarks/{sample}_dv_total_time.txt"],sample=SAMPLES,vc=VC), 
+	params: var_cal={VC}
+	script:
+		"scripts/summarize_benchmarking.py"
+
+rule bwa_mem:
+	input:
+		reads=["data/raw_fastq/{sample}/{sample}_CGGACAAC-TCCGGATT_NA24385_L001_001.R1.fastq.gz", "data/raw_fastq/{sample}/{sample}_CGGACAAC-TCCGGATT_NA24385_L001_001.R2.fastq.gz"]
+		#reads=["data/raw_fastq/{sample}/{sample}_CGGACAAC-TCCGGATT_NA24385_L001_001.R1.fastq.gz", "data/raw_fastq/{sample}/{sample}_CGGACAAC-TCCGGATT_NA24385_L001_001.R2.fastq.gz"]
+	output:
+		"data/aligned/{sample}.bam"
+	conda: 
+		"envs/bwa.yaml"
+	params:
+		index=expand(["data/reference/{ref}.fasta"],ref=REF), 
+		extra=r"-R '@RG\tID:{sample}\tSM:{sample}\tPL:LLUMINA\tSM:{sample}'", #make sure this gets changed if there are multiple fastq runs per sample
+		sort="none",			 # Can be 'none', 'samtools' or 'picard'.
+		sort_order="queryname",  # Can be 'queryname' or 'coordinate'.
+		sort_extra=""			# Extra args for samtools/picard.
+	threads: 32
+	benchmark:
+		"benchmarks/{sample}.bwa.benchmark.txt"
+	log: "logs/{sample}.bwa.log"
+	wrapper: "master/bio/bwa/mem"
+
+rule picard_sortsam:
+	input:
+		"data/aligned/{sample}.bam"
+	output:
+		"data/sorted/{sample}_sorted.bam"
+	conda:
+		"envs/picard.yaml"
+	threads:32
+	benchmark:
+		"benchmarks/{sample}.sortsam.benchmark.txt"
+	params:
+		sort_order="coordinate"		
+	log: "logs/{sample}.sortsam.log"
+	wrapper: "master/bio/picard/sortsam"
+
+rule picard_markdups:
+	input:
+		"data/sorted/{sample}_sorted.bam"
+	output:
+		bam="data/dedup/{sample}_dedup.bam",
+		metrics="data/dedup/{sample}.dedup.metrics.txt"
+	threads: 32
+	benchmark:
+		"benchmarks/{sample}.markdups.benchmark.txt"
+	log:
+		"logs/{sample}.markdups.log"
+	wrapper:
+		"master/bio/picard/markduplicates"
+
+rule picard_index:
+	input:
+		"data/dedup/{sample}_dedup.bam"
+	output:
+		"data/dedup/{sample}_dedup.bam.bai"
+	conda:
+		"envs/picard.yaml"
+	benchmark:
+		"benchmarks/{sample}.index.benchmark.txt"
+	log: "logs/{sample}.index.log"
+	threads:32
+	shell:
+		"picard BuildBamIndex I={input} O={output}"
+
+rule gatk_baserecalibrator:
+	input:
+		bam="data/dedup/{sample}_dedup.bam",
+		ref=expand(["data/reference/{ref}.fasta"],ref=REF), 
+		dict=expand(["data/reference/{ref}.dict"],ref=REF), 
+		known="resources/Homo_sapiens_assembly38.known_indels.vcf.gz"  # optional known sites - single or a list
+	output:
+		recal_table="data/recal/{sample}.grp"
+	log:
+		"logs/{sample}.baserecalibrator.log"
+	benchmark:
+		"benchmarks/{sample}.baserecalibrator.benchmark.txt"
+	threads:32
+	wrapper:
+		"master/bio/gatk/baserecalibrator"
+
+rule gatk_applybqsr:
+	input:
+		bam="data/dedup/{sample}_dedup.bam",
+		ref=expand(["data/reference/{ref}.fasta"],ref=REF), 
+		dict=expand(["data/reference/{ref}.dict"],ref=REF), 
+		recal_table="data/recal/{sample}.grp", 
+	output:
+		bam="data/recal/{sample}_recal.bam", 
+	log:
+		"logs/{sample}.applybqsr.log"
+	benchmark:
+		"benchmarks/{sample}.applybqsr.benchmark.txt"
+	params:
+		extra="",  # optional
+		java_opts="", # optional
+	resources:
+		mem_mb=1024
+	threads:32
+	wrapper:
+		"master/bio/gatk/applybqsr"
+	
+rule samtools_flagstat:
+	input:
+		"data/sorted/{sample}_sorted.bam"
+	output:
+		"data/stats/{sample}_stats.txt"
+	conda:
+		"envs/samtools.yaml"
+	log:
+		"logs/{sample}.flagstat.log"
+	benchmark:
+		"benchmarks/{sample}.flagstat.benchmark.txt"
+	threads:32
+	shell:
+		"samtools flagstat {input} > {output}"
+
+rule samtools_depth:
+	input:
+		"data/sorted/{sample}_sorted.bam"
+	output:
+		samout="data/stats/{sample}.depth_all.out", 
+		pyout="data/stats/{sample}.ave_depth.txt"
+	log:
+		"logs/{sample}.depth.log"
+	benchmark:
+		"benchmarks/{sample}.depth.benchmark.txt"
+	conda:
+		"envs/samtools.yaml"
+	threads:32
+	shell:
+		"samtools depth {input} > {output.samout} | python3 scripts/find_mean.py {output.samout} {output.pyout}"
+
+rule haplotype_caller:
+	input:
+		# single or list of bam files
+		bam="data/recal/{sample}_recal.bam",
+		ref=expand(["data/reference/{ref}.fasta"],ref=REF)
+	output:
+		gvcf="data/calls/{sample}.hc.vcf.gz",
+	log:
+		"logs/{sample}.hc.log"
+	benchmark:
+		"benchmarks/{sample}.hc.benchmark.txt"
+	params:
+		extra="",  # optional
+		java_opts="", # optional
+	# optional specification of memory usage of the JVM that snakemake will respect with global
+	# resource restrictions (https://snakemake.readthedocs.io/en/latest/snakefiles/rules.html#resources)
+	# and which can be used to request RAM during cluster job submission as `{resources.mem_mb}`:
+	# https://snakemake.readthedocs.io/en/latest/executing/cluster.html#job-properties
+	resources:
+		mem_mb=1024
+	conda:
+		"envs/gatk.yaml"
+	threads:32
+	wrapper:
+		"master/bio/gatk/haplotypecaller"
+
+rule variantrecalibrator:
+	input:
+		vcf="data/calls/{sample}.hc.vcf.gz",
+		ref=expand(["data/reference/{ref}.fasta"],ref=REF), 
+		# resources have to be given as named input files
+		hapmap="resources/hapmap_3.3.hg38.vcf.gz",
+		omni="resources/1000G_omni2.5.hg38.vcf.gz",
+		g1k="resources/1000G_phase1.snps.high_confidence.hg38.vcf.gz",
+		dbsnp="resources/Homo_sapiens_assembly38.dbsnp138.vcf",
+	output:
+		recal="data/calls/{sample}.hc.recal",
+		tranches="data/calls/{sample}.hc.tranches"
+	log:
+		"logs/{sample}.hc.variantrecalibrator.log"
+	benchmark:
+		"benchmarks/{sample}.variantrecalibrator.hc.benchmark.txt"
+	threads:32
+	params:
+		mode="BOTH",  # set mode, must be either SNP, INDEL or BOTH
+		# resource parameter definition. Key must match named input files from above.
+		resources={"hapmap": {"known": False, "training": True, "truth": True, "prior": 15.0},
+				"omni":   {"known": False, "training": True, "truth": False, "prior": 12.0},
+				"g1k":   {"known": False, "training": True, "truth": False, "prior": 10.0},
+				"dbsnp":  {"known": True, "training": False, "truth": False, "prior": 2.0}},
+		annotation=["QD", "FisherStrand"],  # which fields to use with -an (see VariantRecalibrator docs)
+		extra="",  # optional
+		java_opts="", # optional
+	# optional specification of memory usage of the JVM that snakemake will respect with global
+	# resource restrictions (https://snakemake.readthedocs.io/en/latest/snakefiles/rules.html#resources)
+	# and which can be used to request RAM during cluster job submission as `{resources.mem_mb}`:
+	# https://snakemake.readthedocs.io/en/latest/executing/cluster.html#job-properties
+	resources:
+		mem_mb=1024
+	conda:
+		"envs/gatk.yaml"
+	container: "https://hub.docker.com/r/broadinstitute/gatk/"
+	#wrapper: "master/bio/gatk/variantrecalibrator"
+	shell:
+		"gatk VariantRecalibrator "
+    	"-R {input.ref} -V {input.vcf} "
+    	"-mode {params.mode} "
+        "-resource:hapmap,known=false,training=true,truth=true,prior=15 resources/hapmap_3.3.hg38.vcf.gz "
+		"-resource:omni,known=false,training=true,truth=true,prior=12 resources/1000G_omni2.5.hg38.vcf.gz "
+		"-resource:1000G,known=false,training=true,truth=false,prior=10 resources/1000G_phase1.snps.high_confidence.hg38.vcf.gz "
+		"-resource:dbsnp,known=true,training=false,truth=false,prior=7 resources/Homo_sapiens_assembly38.dbsnp138.vcf "
+		"-an QD -an FS -an MQ -an SOR -an DP "
+		"-O {output.recal} --tranches-file {output.tranches} "
+
+rule apply_vqsr:
+	input:
+		vcf="data/calls/{sample}.hc.vcf.gz",
+		recal="data/calls/{sample}.hc.recal",
+		tranches="data/calls/{sample}.hc.tranches",
+		ref=expand(["data/reference/{ref}.fasta"],ref=REF), 
+	output:
+		vcf="data/calls/{sample}.hc.vqsr.vcf.gz"
+	log:
+		"logs/{sample}.hc.applyvqsr.log"
+	benchmark:
+		"benchmarks/{sample}.applyvqsr.hc.benchmark.txt"
+	params:
+		mode="BOTH",  # set mode, must be either SNP, INDEL or BOTH
+		extra="" # optional
+	resources:
+		mem_mb=150
+	conda:
+		"envs/gatk.yaml"
+	threads:32
+	wrapper:
+		"master/bio/gatk/applyvqsr"
+
+rule vcftools_hc:
+	input:
+		"data/calls/{sample}.hc.vqsr.vcf.gz"
+	output:
+		"data/stats/{sample}.hc.log.out"
+	benchmark:
+		"benchmarks/{sample}.vcftools.hc.benchmark.txt"
+	log:
+		"logs/{sample}.hc.vcftools.log"
+	params:
+		out="{sample}.hc"
+	threads:32
+	conda:
+		"envs/vcftools.yaml"
+	shell:
+		"vcftools --gzvcf {input} --out {params.out}"
+
+rule happy_hc:
+	input:
+		truth="resources/HG002_GRCh38_1_22_v4.2_benchmark.vcf.gz",
+		query="data/calls/{sample}.hc.vqsr.vcf.gz",
+		truth_regions="resources/HG002_GRCh38_1_22_v4.2_benchmark.bed",
+		#strats="stratifications.tsv",
+		#strat_dir="strats_dir",
+		genome=expand(["data/reference/{ref}.fasta"],ref=REF), 
+		genome_index=expand(["data/reference/{ref}.fasta.fai"],ref=REF), 
+	output:
+		multiext("happy/{sample}.haplotypecaller.results",".runinfo.json",".vcf.gz",".summary.csv",
+				".extended.csv",".metrics.json.gz",".roc.all.csv.gz",
+				".roc.Locations.INDEL.csv.gz",".roc.Locations.INDEL.PASS.csv.gz",
+				".roc.Locations.SNP.csv.gz",".roc.tsv")
+	params:
+		engine="vcfeval",
+		prefix=lambda wc, input, output: output[0].split('.')[0],
+		## parameters such as -L to left-align variants
+		extra="--verbose"
+	benchmark:
+		"benchmarks/{sample}.hap.py.haplotypecaller.benchmark.txt"
+	log:
+		"logs/{sample}.hc.hap.py.log"
+	conda:
+		"envs/hap.py.yaml"
+	threads: 32
+	shell: "sh scripts/run-hap.py.hc.sh"
+
+rule deepvariant:
+	input:
+		bam="data/dedup/{sample}_dedup.bam",
+		ref=expand(["data/reference/{ref}.fasta"],ref=REF), 
+		index="data/dedup/{sample}_dedup.bam.bai", 
+	output:
+		vcf="data/calls/{sample}.dv.vcf",
+	params:
+		model="WGS",   # {wgs, wes, pacbio, hybrid}
+		sample_name=lambda w: w.sample, # optional
+		extra="", 
+	benchmark:
+		"benchmarks/{sample}.dv.benchmark.txt"
+	log:
+		"logs/{sample}.dv.log"
+	threads: 32
+	#script: "master/bio/deepvariant/wrapper.py"
+	shell: "sh scripts/run-deepvariant.sh"
+
+rule vcftools_vc:
+	input:
+		"data/calls/{sample}.dv.vcf"
+	output:
+		"data/stats/{sample}.dv.log"
+	benchmark:
+		"benchmarks/{sample}.vcftools.benchmark.txt"
+	log:
+		"logs/{sample}.dv.vcftools.log"
+	params:
+		out="data/stats/{sample}.dv"
+	conda:
+		"envs/vcftools.yaml"
+	shell:
+		"vcftools --gzvcf {input} --out {params.out}"
+
+rule happy_dv:
+	input:
+		truth="resources/HG002_GRCh38_1_22_v4.2_benchmark.vcf.gz",
+		query="data/calls/{sample}.dv.vcf",
+		truth_regions="resources/HG002_GRCh38_1_22_v4.2_benchmark.bed",
+		#strats="stratifications.tsv",
+		#strat_dir="strats_dir",
+		genome=expand(["data/reference/{ref}.fasta"],ref=REF), 
+		genome_index=expand(["data/reference/{ref}.fasta.fai"],ref=REF), 
+	output:
+		multiext("data/calls/{sample}.deepvariant.results",".runinfo.json",".vcf.gz",".summary.csv",
+				".extended.csv",".metrics.json.gz",".roc.all.csv.gz",
+				".roc.Locations.INDEL.csv.gz",".roc.Locations.INDEL.PASS.csv.gz",
+				".roc.Locations.SNP.csv.gz",".roc.tsv")
+	params:
+		engine="vcfeval",
+		prefix=lambda wc, input, output: output[0].split('.')[0],
+		## parameters such as -L to left-align variants
+		extra="--verbose"
+	benchmark:
+		"benchmarks/{sample}.hap.py.deepvariant.benchmark.txt"
+	log:
+		"logs/{sample}.dv.hap.py.log"
+	threads: 32
+	shell: "sh scripts/run-hap.py.dv.sh"
+		#"hap.py {input.truth} {input.query} --threads {threads} --engine={params.engine} -r {input.genome} -R {input.truth_regions} -o {params.prefix} --logfile {log}"
+
