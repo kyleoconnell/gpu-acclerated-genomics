@@ -1,0 +1,115 @@
+configfile: "config_somatic_GPU.yaml"
+SAMPLES=config["samples"]
+REF=config["ref"]
+VC = config["variant_caller"]
+THREADS = config["threads"]
+TUMORNAME = config["tumorname"]
+SAMPLENAME = config["normalname"]
+CPUS=config["CPUs"]
+print('samples=', SAMPLES)
+print('reference=', REF)
+print('Variant Caller=', VC)
+
+
+rule all:
+        input:
+                expand("benchmarks/{sample}.mutect.benchmark.txt",sample=SAMPLES),
+                #expand("benchmarks/{sample}.lofreq.benchmark.txt",sample=SAMPLES),
+                expand("benchmarks/{sample}.strelka.benchmark.txt",sample=SAMPLES),
+                #expand("data/calls/strelka/{sample}",sample=SAMPLES),
+                expand("benchmarks/{sample}.somaticsniper.benchmark.txt",sample=SAMPLES),
+
+rule mutect:
+        input:
+                T="data/bams/{sample}_T_rescaled.bam",
+                N="data/bams/{sample}_N_rescaled.bam"
+        #output:
+        #       "data/calls/mutect/{sample}.out.vcf"
+        params:
+                index=expand(["data/reference/{ref}.fasta"],ref=REF),
+                tname=TUMORNAME
+        benchmark:
+                "benchmarks/{sample}.mutect.benchmark.txt"
+        log:
+                "logs/{sample}.mutect.log"
+        resources:
+                nvidia_gpu=THREADS
+        run:
+                shell("mkdir -p data/calls/GPU_{THREADS}/mutect")
+                shell("sudo pbrun mutectcaller --ref {params.index} \
+                --in-tumor-bam {input.T} \
+                --tumor-name {params.tname} \
+                --gpu-devices 0,1,2,3,4,5,6,7 \
+                --num-gpus {THREADS} \
+                --out-vcf data/calls/GPU_{THREADS}/mutect/{wildcards.sample}.vcf")
+
+rule lofreq:
+        input:
+                T="data/bams/{sample}_T_rescaled.bam",
+                N="data/bams/{sample}_N_rescaled.bam"
+        #output:
+        #       directory("data/calls/lofreq/{sample}")
+        params:
+                index=expand(["data/reference/{ref}.fasta"],ref=REF)
+        benchmark:
+                "benchmarks/{sample}.lofreq.benchmark.txt"
+        log:
+                "logs/{sample}.lofreq.log"
+        resources:
+                nvidia_gpu=THREADS
+        run:
+                shell("mkdir -p data/calls/GPU_{THREADS}/lofreq")
+                shell("sudo pbrun lofreq --ref {params.index} \
+                --in-tumor-bam {input.T} \
+                --in-normal-bam {input.N} \
+                --gpu-devices 0,1 \
+                --num-gpus {THREADS} \
+                --output-dir data/calls/GPU_{THREADS}/lofreq/{wildcards.sample}")
+
+rule strelka:
+        input:
+                T="data/bams/{sample}_T_rescaled.bam",
+                N="data/bams/{sample}_N_rescaled.bam"
+        #output:
+        #       "data/calls/strelka/{sample}"
+        params:
+                index=expand(["data/reference/{ref}.fasta"],ref=REF)
+        benchmark:
+                "benchmarks/{sample}.strelka.benchmark.txt"
+        log:
+                "logs/{sample}.strelka.log"
+        resources:
+                nvidia_gpu=THREADS
+        threads:
+                CPUS
+        run:
+                shell("mkdir -p data/calls/GPU_{THREADS}/strelka")
+                shell("sudo pbrun strelka_workflow --ref {params.index} \
+                --in-tumor-bam {input.T} \
+                --in-normal-bam {input.N} \
+                --num-threads {CPUS} \
+                --out-prefix data/calls/GPU_{THREADS}/strelka/{wildcards.sample}")
+
+rule somaticsniper:
+        input:
+                T="data/bams/{sample}_T_rescaled.bam",
+                N="data/bams/{sample}_N_rescaled.bam"
+        #output:
+        #       directory("data/calls/somaticsniper")
+        params:
+                index=expand(["data/reference/{ref}.fasta"],ref=REF)
+        benchmark:
+                "benchmarks/{sample}.somaticsniper.benchmark.txt"
+        log:
+                "logs/{sample}.somaticsniper.log"
+        resources:
+                nvidia_gpu=THREADS
+        threads:
+                CPUS
+        run:
+                shell("mkdir -p data/calls/GPU_{THREADS}/somaticsniper")
+                shell("sudo pbrun somaticsniper_workflow --ref {params.index} \
+                --in-tumor-bam {input.T} \
+                --in-normal-bam {input.N} \
+                --num-threads {CPUS} \
+                --out-prefix data/calls/GPU_{THREADS}/somaticsniper/{wildcards.sample}")
