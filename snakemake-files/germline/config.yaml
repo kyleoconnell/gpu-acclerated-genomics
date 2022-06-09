@@ -1,0 +1,7 @@
+samples:
+    HG002: HG002
+variant_caller:
+    haplotypecaller
+    #deepvariant
+ref:
+   Homo_sapiens_assembly38
