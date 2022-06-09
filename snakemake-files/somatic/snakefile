@@ -1,0 +1,161 @@
+#snakefile for all somatic callers except muse
+SAMPLES = ["T", "N"]
+THREADS = 32
+
+rule all:
+	input:
+		"var_calling/mutect/somatic.vcf",
+		"var_calling/somaticsniper/somatic.vcf",
+		"logs/lofreq.log",
+		"logs/strelka.log"
+
+rule mark_duplicates:
+        input:
+                "bams/{sample}.sorted.bam"
+        output:
+                "var_calling/{sample}dup.bam"
+	log:
+		"logs/{sample}_markduplicates.log"
+	threads:
+		THREADS
+	benchmark:
+		"benchmarks/{sample}_markduplicates_benchmark.txt"
+	run:
+		shell("gatk MarkDuplicates -I {input} -O {output} -M metrics.txt 2> {log}")
+
+rule base_recalibrator:
+        input:
+                ref="/home/usa_kyoconnell_deloitte_com/reference/Homo_sapiens_assembly38.fasta",
+		vcf="/home/usa_kyoconnell_deloitte_com/resources/Homo_sapiens_assembly38.known_indels.vcf.gz",
+		bam="var_calling/{sample}dup.bam"
+        output:
+                "var_calling/{sample}_bqsr_report.txt"
+	threads:
+		THREADS
+	log:
+		"logs/{sample}_bqsr.log"
+	benchmark:
+		"benchmarks/{sample}_bqsr_benchmark.txt"
+	shell:
+                "gatk BaseRecalibrator -I {input.bam} -O {output} --known-sites {input.vcf} -R {input.ref}  2> {log}"
+
+rule rescale_bam:
+	input:
+		ref="/home/usa_kyoconnell_deloitte_com/reference/Homo_sapiens_assembly38.fasta",
+		dupbam="var_calling/{sample}dup.bam",
+		bqsr="var_calling/{sample}_bqsr_report.txt"
+	output:
+		"var_calling/{sample}_rescaled.bam"
+	threads:
+		THREADS
+	log:
+		"logs/{sample}_rescale_bamlog.log"
+	benchmark:
+		"benchmarks/{sample}_rescale_bam_benchmark.txt"
+	run:
+		shell("gatk ApplyBQSR -R {input.ref} -I {input.dupbam} -O {output} --bqsr-recal-file {input.bqsr}  2> {log}")
+		shell("samtools index {output}")
+
+rule index_rescale:
+	input:
+		"var_calling/{sample}_rescaled.bam"
+	output:
+		"var_calling/{sample}_rescaled.bam.bai"
+	threads:
+		THREADS
+	shell:
+		"samtools index {input}"
+
+rule mutect:
+	input:
+		fasta="/home/usa_kyoconnell_deloitte_com/reference/Homo_sapiens_assembly38.fasta",
+		T="var_calling/T_rescaled.bam",
+		N="var_calling/N_rescaled.bam"
+	output:
+		vcf="var_calling/mutect/somatic.vcf"
+	message:
+		"Testing Mutect2"
+	threads:
+		THREADS
+	benchmark:
+		"benchmarks/mutect2_benchmark.txt"
+	log:
+		"logs/mutect2.log"
+	run:
+		shell("gatk Mutect2 \
+			-R {input.fasta} \
+			--input {input.T} \
+			--tumor-sample HG002  \
+			--output {output} \
+			--native-pair-hmm-threads {THREADS}")
+	#wrapper:
+	#	"v1.1.0/bio/gatk/mutect"
+
+rule somaticsniper:
+	input:
+		T="var_calling/T_rescaled.bam",
+		N="var_calling/N_rescaled.bam",
+		ref="/home/usa_kyoconnell_deloitte_com/reference/Homo_sapiens_assembly38.fasta"
+	output:
+		"var_calling/somaticsniper/somatic.vcf"
+	threads:
+		THREADS
+	params:
+		q=1,
+		d=2147483647
+	log:
+		"logs/somaticsniper.log"
+	benchmark:
+		"benchmarks/somaticsniper_benchmark.txt"
+	run:
+		shell("bam-somaticsniper -q {params.q} -G -L -F vcf -f {input.ref} {input.T} {input.N} {output} 2> {log}")
+		shell("""bcftools mpileup -A -B -d {params.d} -Ou -f {input.ref} {input.T} | bcftools call -c | perl /home/usa_roscampbell_deloitte_com/miniconda3/envs/snakemake-tutorial/bin/vcfutils.pl varFilter -Q 20 | awk "NR > 55 {{print}}" > var_calling/somaticsniper/output.indel_pileup_Tum.pileup 2> {log}""")
+		#shell("cp {output} var_calling/somaticsniper/backup.vcf 2> {log}")
+		shell("perl /home/usa_roscampbell_deloitte_com/somatic-sniper/src/scripts/snpfilter.pl --snp-file {output} --indel-file var_calling/somaticsniper/output.indel_pileup_Tum.pileup 2> {log}")
+		shell("perl /home/usa_roscampbell_deloitte_com/somatic-sniper/src/scripts/prepare_for_readcount.pl --snp-file {output}.SNPfilter 2> {log}")
+		shell("/home/usa_roscampbell_deloitte_com/bam-readcount/build/bin/bam-readcount -b 15 -f {input.ref} -l {output}.SNPfilter.pos {input.T} > var_calling/somaticsniper/output.readcounts.rc 2> {log}")
+		shell("perl /home/usa_roscampbell_deloitte_com/somatic-sniper/src/scripts/fpfilter.pl -snp-file {output}.SNPfilter -readcount-file var_calling/somaticsniper/output.readcounts.rc 2> {log}")
+		shell("cp {output}.SNPfilter.fp_pass {output}.SNPfilter.fp_pass.vcf 2> {log}")
+		shell("perl /home/usa_roscampbell_deloitte_com/somatic-sniper/src/scripts/highconfidence.pl -snp-file {output}.SNPfilter.fp_pass.vcf 2> {log}")
+
+rule lofreq:
+	input:
+		N="var_calling/N_rescaled.bam",
+		T="var_calling/T_rescaled.bam",
+		ref="/home/usa_kyoconnell_deloitte_com/reference/Homo_sapiens_assembly38.fasta"
+	threads:
+		THREADS
+	log:
+		"logs/lofreq.log"
+	benchmark:
+		"benchmarks/lofreq_benchmark.txt"
+	#output:
+	#	directory("var_calling/lofreq")
+	run:
+		shell("mkdir -p var_calling/lofreq")
+		shell("/home/usa_roscampbell_deloitte_com/lofreq/dist/lofreq_star-2.1.3.1/bin/lofreq somatic -n {input.N} -t {input.T} -o var_calling/lofreq/out_ -f {input.ref} --threads 32 -d /home/usa_roscampbell_deloitte_com/Homo_sapiens_assembly38.dbsnp138.vcf.gz --baq-off --no-src-qual --call-rlx-extra-args '@d 2147483647' 2> {log}")
+
+rule strelka:
+	input:
+		ref="/home/usa_kyoconnell_deloitte_com/reference/Homo_sapiens_assembly38.fasta",
+		T="var_calling/T_rescaled.bam",
+		N="var_calling/N_rescaled.bam"
+	#output:
+	#	"var_calling/manta_work/results/variants/candidateSmallIndels.vcf.gz"
+	threads:
+		THREADS
+	benchmark:
+		"benchmarks/strelka_benchmark.txt"
+	log:
+		"logs/strelka.log"
+	run:
+		shell("mkdir -p var_calling/manta_work")
+		shell("/usr/bin/python2.7 /home/usa_roscampbell_deloitte_com/manta-1.6.0.centos6_x86_64/bin/configManta.py --referenceFasta {input.ref} --normalBam {input.N} --tumorBam {input.T} --runDir var_calling/manta_work 2> {log}")
+		shell("cd var_calling/manta_work")
+		shell("/usr/bin/python2.7 /home/usa_roscampbell_deloitte_com/varcalling/var_calling/manta_work/runWorkflow.py -m local -j 32 2> {log}")
+		shell("cd ..")
+		shell("mkdir -p var_calling/strelka_work")
+		shell("/usr/bin/python2.7 /home/usa_roscampbell_deloitte_com/strelka-2.9.10.centos6_x86_64/bin/configureStrelkaSomaticWorkflow.py --referenceFasta {input.ref} --normalBam {input.N} --tumorBam {input.T} --indelCandidates var_calling/manta_work/results/variants/candidateSmallIndels.vcf.gz --runDir var_calling/strelka_work 2> {log}")
+		shell("cd var_calling/strelka_work")
+		shell("/usr/bin/python2.7 /home/usa_roscampbell_deloitte_com/varcalling/var_calling/strelka_work/runWorkflow.py -m local -j 32 2> {log}")
+
