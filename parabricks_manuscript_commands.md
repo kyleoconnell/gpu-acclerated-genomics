@@ -3,7 +3,8 @@
 ### 1. _Germline workflows_ 
 
 GATK Haplotypecaller:
-```bwa mem -t 32 -Y -K 10000000 -r $READGROUP $REF $FORWARD $REVERSE | gatk SortSam -I out.sam -O out.bam -SO coordinate
+```
+bwa mem -t 32 -Y -K 10000000 -r $READGROUP $REF $FORWARD $REVERSE | gatk SortSam -I out.sam -O out.bam -SO coordinate
 gatk MarkDuplicates I=out.bam O=dup.bam M=metrics.txt
 gatk BaseRecalibrator -I dup.bam -O bqsr_out.txt --known-sites Homo_sapiens_assembly38.known_indels.vcf.gzs -R $REF
 gatk ApplyBQSR -R $REF -I dup.bam -O combined.bam -bqsr-recal-file bqsr_out.txt
